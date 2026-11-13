@@ -5,10 +5,10 @@
 On the cluster's login node, in a folder with **at least 30 GB free** (project or scratch space, not a small home directory), run:
 
 ```bash
-git clone -b amu-rescore https://github.com/czajkowskis/optimizing-lean-agents.git && bash optimizing-lean-agents/helios/amu/run.sh
+git clone -b amu-rescore https://github.com/czajkowskis/optimizing-lean-agents-peano.git && bash optimizing-lean-agents-peano/helios/amu/run.sh
 ```
 
-When the jobs finish, the result is `optimizing-lean-agents/amu_stats.tar.gz` (about 1 GB). **Send that file to Szymon.** That's all.
+When the jobs finish, the result is `optimizing-lean-agents-peano/amu_stats.tar.gz` (about 1 GB). **Send that file to Szymon.** That's all.
 
 If the cluster needs it, add options at the end of the command:
 
@@ -20,7 +20,7 @@ If the cluster needs it, add options at the end of the command:
 | `--gpus 8` | You want to use more GPUs at once. The default is 4. |
 | `--torch-index https://download.pytorch.org/whl/cu121` | The GPU driver is old and PyTorch can't use the GPU. The check job tells you if this happens. |
 
-For example: `bash optimizing-lean-agents/helios/amu/run.sh --partition gpu --account myproject`.
+For example: `bash optimizing-lean-agents-peano/helios/amu/run.sh --partition gpu --account myproject`.
 
 **Need:** NVIDIA GPUs with **at least 40 GB** of memory and bf16 support, for example A100, L40S, H100 or H200. Older V100s are too slow. The login node needs internet once, to download the model.
 
@@ -39,7 +39,7 @@ For example: `bash optimizing-lean-agents/helios/amu/run.sh --partition gpu --ac
 | `rescore` | 4 jobs with 1 GPU each, splitting the 16,640 attempts between them. | about 1 h on H100, about 3 h on A100 |
 | `rescore-collect` | Checks that every attempt has results, then packs them into `amu_stats.tar.gz`. | a few minutes |
 
-Watch them with `squeue -u $USER`. The logs are in `optimizing-lean-agents/amu_work/logs/`.
+Watch them with `squeue -u $USER`. The logs are in `optimizing-lean-agents-peano/amu_work/logs/`.
 
 **If something fails or a job hits its time limit,** run the same `run.sh` command again from the same place. The Python environment, the model, a passed check and every finished attempt are all kept. It refuses to start while earlier jobs are still queued or running.
 
