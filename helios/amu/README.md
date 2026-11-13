@@ -5,7 +5,7 @@
 On the cluster's login node, in a folder with **at least 30 GB free** (project or scratch space, not a small home directory), run:
 
 ```bash
-git clone -b amu-rescore https://github.com/eth-sri/optimizing-lean-agents.git && bash optimizing-lean-agents/helios/amu/run.sh
+git clone -b amu-rescore https://github.com/czajkowskis/optimizing-lean-agents.git && bash optimizing-lean-agents/helios/amu/run.sh
 ```
 
 When the jobs finish, the result is `optimizing-lean-agents/amu_stats.tar.gz` (about 1 GB). **Send that file to Szymon.** That's all.
