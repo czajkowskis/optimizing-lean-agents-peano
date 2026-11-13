@@ -8,6 +8,8 @@ On the cluster's login node, in a folder with **at least 30 GB free** (project o
 git clone -b amu-rescore https://github.com/czajkowskis/optimizing-lean-agents-peano.git && bash optimizing-lean-agents-peano/helios/amu/run.sh
 ```
 
+*Using an AI coding agent?* Give it this prompt: "Follow `helios/amu/AGENT.md` from the `amu-rescore` branch of https://github.com/czajkowskis/optimizing-lean-agents-peano".
+
 When the jobs finish, the result is `optimizing-lean-agents-peano/amu_stats.tar.gz` (about 1 GB). **Send that file to Szymon.** That's all.
 
 If the cluster needs it, add options at the end of the command:
