@@ -232,7 +232,12 @@ def send_command_and_wait(child, command, allTactics=False, ast=False, premises=
         response = child.before.strip()
 
         block = response
-        
+        # Helios/AMU: the interactive shell prompt and lake's build progress can precede the
+        # first JSON reply, so parse from the first '{' (same as helios/patches/repl_json_prefix.patch).
+        json_start = block.find("{")
+        if json_start > 0:
+            block = block[json_start:]
+
         # problem_id = proof_code_list[i]["name"]
         try:
             result = json.loads(block)
