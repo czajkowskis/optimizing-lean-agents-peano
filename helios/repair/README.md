@@ -6,6 +6,8 @@ Does the model's entropy on the line where a proof breaks tell us how to repair 
 
 Run on the cluster's login node, from a clone of the `amu-rescore` branch with at least 40 GB free. If the AMU re-scoring clone is still there, use it: the model download in `amu_work/hf_cache` is reused.
 
+*Using an AI coding agent?* Give it this prompt: "Follow `helios/repair/AGENT.md` from the `amu-rescore` branch of https://github.com/czajkowskis/optimizing-lean-agents-peano".
+
 The pilot runs in steps, cheapest first (see "Cost ladder" in [DESIGN.md](DESIGN.md)). After each step, read the `DECISION:` line at the end of `amu_work/repair/report.txt` (`repair_smoke/` for the smoke test). Run the next step only if the decision says so.
 
 | Step | Command | Cost |
