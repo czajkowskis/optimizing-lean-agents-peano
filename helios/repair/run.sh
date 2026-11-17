@@ -1,14 +1,17 @@
 #!/bin/bash
 # One command for the repair pilot on a Slurm cluster (see helios/repair/README.md):
 #
+#   bash helios/repair/run.sh --all [options]     # everything below in one go: smoke, then steps 1, 2, 3 as chained
+#                                                 # Slurm jobs; a failed stage (or a failed smoke check) cancels the rest
 #   bash helios/repair/run.sh --smoke [options]   # 20 attempts x 1 sample per arm: checks the pipeline, measures tokens
 #   bash helios/repair/run.sh --step 1 [options]  # LOCAL only, 2 samples per attempt     (~5M tokens, <1 GPU-hour)
 #   bash helios/repair/run.sh --step 2 [options]  # adds BACK, 2 samples per attempt      (~5M more)
 #   bash helios/repair/run.sh --step 3 [options]  # all arms incl. FEEDBACK, 4 samples   (the full design, ~60M more)
-# Each step reuses everything the earlier steps generated and compiled; run a step only if the
-# previous step's DECISION line says so (see helios/repair/DESIGN.md, "Cost ladder").
+# Each step reuses everything the earlier steps generated and compiled. Run one at a time, a step only if the
+# previous DECISION line says so (DESIGN.md, "Cost ladder"), or all at once with --all, which runs every step.
 #
-# Options: --partition P (GPU) --cpu-partition P --account A --gres gpu:1 --gpus N (default 1; 4 for step 3)
+# Options: --partition P (GPU) --cpu-partition P --account A --gres gpu:1 --gpus N (default 1; 4 for step 3, and
+#          with --all it sets step 3 only)
 #
 # Sets up (once) a vLLM venv, the model and Lean + mathlib4, then submits chained jobs:
 #   1. lean-check (CPU):  build the Lean REPL if needed and recompile original attempts; must
@@ -21,9 +24,10 @@ set -euo pipefail
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "$REPO"
 
-PARTITION="" CPU_PARTITION="" ACCOUNT="" GRES="gpu:1" NGPU="" SMOKE=0 STEP=""
+PARTITION="" CPU_PARTITION="" ACCOUNT="" GRES="gpu:1" NGPU="" SMOKE=0 STEP="" ALL=0
 while [ $# -gt 0 ]; do
   case $1 in
+    --all) ALL=1; shift ;;
     --smoke) SMOKE=1; shift ;;
     --step) STEP=$2; shift 2 ;;
     --partition) PARTITION=$2; shift 2 ;;
@@ -31,27 +35,30 @@ while [ $# -gt 0 ]; do
     --account) ACCOUNT=$2; shift 2 ;;
     --gres) GRES=$2; shift 2 ;;
     --gpus) NGPU=$2; shift 2 ;;
-    -h|--help) sed -n 2,20p "$0"; exit 0 ;;
+    -h|--help) sed -n '2,/^set -euo/{/^#/p}' "$0"; exit 0 ;;
     *) echo "unknown option $1 (see --help)"; exit 2 ;;
   esac
 done
-if [ $SMOKE = 1 ]; then
-  GEN_ARGS="--limit-attempts 20 --samples 1 --arms local,back,feedback"; NGPU=1
+WORK=$REPO/amu_work
+ROUT=$WORK/repair
+if [ $ALL = 1 ]; then
+  NGPU3=${NGPU:-4}        # --gpus applies to step 3; the smoke test and steps 1-2 use 1 GPU
+elif [ $SMOKE = 1 ]; then
+  LABEL=smoke GEN_ARGS="--limit-attempts 20 --samples 1 --arms local,back,feedback" NGPU=1 ROUT=$WORK/repair_smoke
 else
   case $STEP in
-    1) GEN_ARGS="--samples 2 --arms local" ;;
-    2) GEN_ARGS="--samples 2 --arms local,back" ;;
-    3) GEN_ARGS="--samples 4 --arms local,back,feedback"; NGPU=${NGPU:-4} ;;
-    *) echo "choose --smoke or --step 1|2|3 (see --help)"; exit 2 ;;
+    1) LABEL=step1 GEN_ARGS="--samples 2 --arms local" ;;
+    2) LABEL=step2 GEN_ARGS="--samples 2 --arms local,back" ;;
+    3) LABEL=step3 GEN_ARGS="--samples 4 --arms local,back,feedback"; NGPU=${NGPU:-4} ;;
+    *) echo "choose --all, --smoke or --step 1|2|3 (see --help)"; exit 2 ;;
   esac
 fi
 NGPU=${NGPU:-1}
 
-WORK=$REPO/amu_work
+export ROUT   # job.sh needs it; each stage of --all overrides it at submission
 export RVENV=${RVENV:-$WORK/venv_repair}
 export HF_HOME=${HF_HOME:-$WORK/hf_cache}
-if [ $SMOKE = 1 ]; then export ROUT=$WORK/repair_smoke; else export ROUT=$WORK/repair; fi
-mkdir -p "$WORK/logs" "$ROUT"
+mkdir -p "$WORK/logs" "$ROUT" "$WORK/repair_smoke"
 echo '*' > "$WORK/.gitignore"
 say() { printf '\n== %s\n' "$*"; }
 die() { printf '\nERROR: %s\n' "$*" >&2; exit 1; }
@@ -103,36 +110,52 @@ if [ -z "$CPU_PARTITION" ]; then
 fi
 echo "GPU partition $PARTITION ($GRES, $NGPU jobs), CPU partition $CPU_PARTITION, account ${ACCOUNT:-(your default)}"
 A=(${ACCOUNT:+--account="$ACCOUNT"})
-SB_GPU=(sbatch --parsable --partition="$PARTITION" --gres="$GRES" --cpus-per-task=8 --mem=64G --export=ALL "${A[@]}")
-SB_CPU=(sbatch --parsable --partition="$CPU_PARTITION" --cpus-per-task=32 --mem=128G --export=ALL "${A[@]}")
+SB_GPU=(sbatch --parsable --partition="$PARTITION" --gres="$GRES" --cpus-per-task=8 --mem=64G --export=ALL ${A[@]+"${A[@]}"})
+SB_CPU=(sbatch --parsable --partition="$CPU_PARTITION" --cpus-per-task=32 --mem=128G --export=ALL ${A[@]+"${A[@]}"})
 
 say "submitting"
 if squeue -h -u "${USER:-$(whoami)}" -o '%j' 2>/dev/null | grep -q '^repair'; then
   squeue -u "${USER:-$(whoami)}" -o '%.12i %.16j %.10T %.12M %R' | grep -E 'JOBID|repair'
   die "repair jobs from an earlier run are still queued or running; wait for them (or scancel them) and run again"
 fi
-DEP=()
+DEPS=""   # job ids the next stage waits for (all must succeed)
 if [ -f "$WORK/lean_check_passed" ]; then
   echo "Lean check already passed earlier: skipping it"
 else
-  J1=$("${SB_CPU[@]}" --job-name=repair-lean --time=08:00:00 --output="$WORK/logs/repair-lean-%j.out" helios/repair/job.sh lean)
-  echo "lean-check job: $J1"
-  DEP=(--dependency=afterok:$J1 --kill-on-invalid-dep=yes)
+  J=$("${SB_CPU[@]}" --job-name=repair-lean --time=08:00:00 --output="$WORK/logs/repair-lean-%j.out" helios/repair/job.sh lean)
+  echo "lean-check job: $J"
+  DEPS=$J
 fi
-echo "generation: $GEN_ARGS"
-J2=$("${SB_GPU[@]}" "${DEP[@]}" --job-name=repair-gen --time=12:00:00 --array=0-$((NGPU - 1)) \
-     --output="$WORK/logs/repair-gen-%A_%a.out" helios/repair/job.sh generate "$NGPU" $GEN_ARGS)
-echo "generate job: $J2 (array of $NGPU)"
-J3=$("${SB_CPU[@]}" --dependency=afterany:$J2 --kill-on-invalid-dep=yes --job-name=repair-compile --time=12:00:00 \
-     --output="$WORK/logs/repair-compile-%j.out" helios/repair/job.sh compile)
-echo "compile job:  $J3"
-J4=$("${SB_CPU[@]}" --dependency=afterok:$J3 --kill-on-invalid-dep=yes --cpus-per-task=2 --mem=16G --job-name=repair-analyze \
-     --time=01:00:00 --output="$WORK/logs/repair-analyze-%j.out" helios/repair/job.sh analyze)
-echo "analyze job:  $J4"
+
+# submit_stage LABEL OUTDIR NGPU GEN_ARGS...: generate -> compile -> analyze, after $DEPS; sets DEPS for the next stage
+submit_stage() {
+  local label=$1 out=$2 ngpu=$3; shift 3
+  local dep=(); [ -n "$DEPS" ] && dep=(--dependency=afterok:$DEPS --kill-on-invalid-dep=yes)
+  echo "-- $label: generation $*, $ngpu GPU job(s), output $out"
+  local g c a
+  g=$(ROUT=$out "${SB_GPU[@]}" ${dep[@]+"${dep[@]}"} --job-name=repair-gen-$label --time=12:00:00 --array=0-$((ngpu - 1)) \
+      --output="$WORK/logs/repair-gen-$label-%A_%a.out" helios/repair/job.sh generate "$ngpu" "$@")
+  c=$(ROUT=$out "${SB_CPU[@]}" --dependency=afterany:$g --kill-on-invalid-dep=yes --job-name=repair-compile-$label --time=12:00:00 \
+      --output="$WORK/logs/repair-compile-$label-%j.out" helios/repair/job.sh compile)
+  a=$(ROUT=$out "${SB_CPU[@]}" --dependency=afterok:$c --kill-on-invalid-dep=yes --cpus-per-task=2 --mem=16G \
+      --job-name=repair-analyze-$label --time=01:00:00 --output="$WORK/logs/repair-analyze-$label-%j.out" helios/repair/job.sh analyze "$label")
+  echo "   generate $g (array of $ngpu), compile $c, analyze $a"
+  # the next stage starts only if this stage's generation and analysis both succeeded
+  DEPS="$g:$a"
+}
+
+if [ $ALL = 1 ]; then
+  submit_stage smoke "$WORK/repair_smoke" 1 --limit-attempts 20 --samples 1 --arms local,back,feedback
+  submit_stage step1 "$WORK/repair" 1 --samples 2 --arms local
+  submit_stage step2 "$WORK/repair" 1 --samples 2 --arms local,back
+  submit_stage step3 "$WORK/repair" "${NGPU3:-4}" --samples 4 --arms local,back,feedback
+else
+  submit_stage "$LABEL" "$ROUT" "$NGPU" $GEN_ARGS
+fi
 
 cat <<EOF
 
 Submitted. Watch with: squeue -u \$USER     Logs: $WORK/logs/repair-*
-When done, send back: $ROUT/analysis.json, $ROUT/compiled.jsonl and $WORK/logs/repair-* (or the tarball the analyze job prints).
-If a job fails or times out, run the same command again: finished work is kept.
+Each stage writes report_<stage>.txt (ending in a DECISION line) and <stage>_results.tar.gz in $REPO.
+Send the result archives to Szymon. If a job fails or times out, run the same command again: finished work is kept.
 EOF

@@ -6,29 +6,31 @@ You are helping a researcher (the **operator**, who started you) run a GPU exper
 
 The language model Goedel-Prover-V2-8B writes Lean proofs. For 872 of its saved failed proofs, the experiment asks the model to repair each one in several ways. It then checks every repaired proof with Lean and measures whether the model's uncertainty (entropy) on the broken line predicts which repair works. The design is in `helios/repair/DESIGN.md`. You don't need it to run things.
 
-Everything is automated by `helios/repair/run.sh`. It runs in **steps, cheapest first**, and each step ends with a `DECISION:` line that says whether the next step is worth running.
+Everything is automated by `helios/repair/run.sh --all`. **One command submits all stages as a chain of Slurm jobs**, each starting when the one before it succeeds:
 
-| Step | Command flag | GPU cost | Runs only if |
-|---|---|---|---|
-| smoke | `--smoke` | minutes | always first |
-| 1 | `--step 1` | under 1 A100-hour | the smoke test passed |
-| 2 | `--step 2` | under 1 A100-hour | step 1's DECISION starts with `GO TO STEP 2` or `INCONCLUSIVE` |
-| 3 | `--step 3 --gpus 4` | about 6–12 A100-hours | step 2's DECISION starts with `GO` or `INTERACTION WITHOUT CROSSOVER`, **and the operator approves** |
+| Stage | What it generates | GPU cost |
+|---|---|---|
+| Lean check | nothing: recompiles 87 original proofs and compares them with the original verdicts | 0 (CPU) |
+| smoke | 20 attempts × 1 sample per arm, plus an automatic smoke gate | minutes |
+| step 1 | LOCAL × 2 samples, 872 attempts | under 1 A100-hour |
+| step 2 | adds BACK × 2 samples | under 1 A100-hour |
+| step 3 | adds FEEDBACK and raises every arm to 4 samples (4 GPUs) | about 6–12 A100-hours |
+
+**All stages run, whatever the earlier `DECISION:` lines say.** Those lines are for Szymon to read afterwards. The chain stops by itself only if something is broken: the Lean check fails, the smoke gate fails, or a job fails. Expect about 8–14 GPU-hours in total.
 
 Your job is to:
 - pick the right cluster settings;
-- run the smoke test and then the steps;
-- read each DECISION and stop where it says to stop;
-- fix routine failures;
-- report back after every step.
+- start the run with one command;
+- watch it, and fix routine failures by rerunning the same command;
+- report back.
 
-**Done means:** the last step you were allowed to run has finished, its `report.txt` ends with a `DECISION:` line, and its results archive exists.
+**Done means:** `report_step3.txt` ends with a `DECISION:` line and `step3_results.tar.gz` exists in the clone's root folder, or the chain stopped on a failure you have reported.
 
 ## Rules
 
 1. **Do not change** anything in `helios/repair/data/`, `helios/repair/*.py`, `lean_compiler/`, `prover/` or `mathlib4/`. Do not change the model, its precision (bf16), the sampling settings, or the pinned versions (vLLM 0.21.0, transformers 5.9.0). The results must stay comparable with the original runs on another cluster.
 2. **Do not push** to git, open pull requests, or upload anything anywhere. The operator sends the results.
-3. **Do not skip ahead.** Never run a step whose earlier step's DECISION says to stop, and never run step 3 without the operator's explicit approval.
+3. **Use `--all`.** Don't run the stages one by one with `--smoke` or `--step`, and don't stop the chain because of a `DECISION:` line: the researcher wants every stage run.
 4. **Ask the operator before:**
    - using more than 20 GPU-hours in total, including reruns;
    - deleting anything outside the clone's `amu_work/` folder;
@@ -92,90 +94,57 @@ Set your options once; the examples below use them:
 OPTS="--partition <P> --gres <gpu:type:1> [--account <A>] [--cpu-partition <C>]"
 ```
 
-## Step 3: smoke test
+## Step 3: start the whole run
 
 ```bash
-bash helios/repair/run.sh --smoke $OPTS
+bash helios/repair/run.sh --all $OPTS
 ```
 
-On the login node this takes 10–30 minutes. It builds the venv in `amu_work/venv_repair`, downloads the model if needed, installs Lean and downloads prebuilt Mathlib. Then it submits four chained jobs: `repair-lean`, then `repair-gen`, then `repair-compile`, then `repair-analyze`.
+On the login node this takes 10–30 minutes. It builds the venv in `amu_work/venv_repair`, downloads the model if needed, installs Lean and downloads prebuilt Mathlib. Then it submits the whole chain and prints the job ids: the Lean check, then for each of smoke, step1, step2 and step3 a `repair-gen-<stage>`, a `repair-compile-<stage>` and a `repair-analyze-<stage>` job. Note the ids in your log.
 
 **If the login output says `cache get failed`,** prebuilt Mathlib isn't available, and the `repair-lean` job will build it from source. That can take several hours of CPU time, within its 8 h limit. Tell the operator; it's a one-time cost.
 
-Watch the jobs:
+## Step 4: the two automatic gates
 
-```bash
-squeue -u $USER
-cat amu_work/logs/repair-lean-*.out | tail -20
-```
+The chain checks itself twice early on. Look at both as soon as they finish.
 
-The `repair-lean` job recompiles 87 unchanged original proofs and compares the verdicts with the original run:
-- **`COMPILE_CHECK_OK`:** good. The other jobs start by themselves.
-- **`COMPILE_CHECK_FAILED`:** the remaining jobs are cancelled automatically. **Stop here.** Report the last 30 lines of the `repair-lean` log and `amu_work/repair_lean_check/compile_check.json` to the operator, to forward to Szymon. Don't retry with changed settings.
+**1. The Lean check** (`amu_work/logs/repair-lean-*.out`) recompiles 87 unchanged original proofs and compares the verdicts with the original run.
+- **`COMPILE_CHECK_OK`:** good. The chain continues by itself.
+- **`COMPILE_CHECK_FAILED`:** every later job is cancelled automatically. **Stop here.** Report the last 30 lines of the log and `amu_work/repair_lean_check/compile_check.json` (step 5). Don't retry with changed settings.
 
-When `repair-analyze` finishes, check the smoke results:
+**2. The smoke gate** (end of `amu_work/logs/repair-analyze-smoke-*.out`) checks that the repaired proofs mostly close their Lean code block and that Lean ran without system errors.
+- **`SMOKE_OK`:** good. Steps 1–3 follow by themselves.
+- **`SMOKE_FAILED`:** steps 1–3 are cancelled automatically. **Stop here** and report the log and `smoke_results.tar.gz` (step 5).
 
-```bash
-cat amu_work/repair_smoke/report.txt
-grep -c '"no lean block"' amu_work/repair_smoke/compiled.jsonl    # of 57-60 samples
-tail -3 amu_work/logs/repair-gen-*.out                           # tok/s
-```
+Ignore the smoke stage's `DECISION:` line: 20 attempts are far too few to decide anything.
 
-The smoke test **passed** if all of these hold:
-- the Lean check printed `COMPILE_CHECK_OK`;
-- `report.txt` has an arms table with token counts for `local`, `back` and `feedback`;
-- the `repair-compile` log ends with `COMPILE_OK`;
-- at most about half of the `local` and `back` samples are `no lean block`.
+Steps 1–3 all write to `amu_work/repair/`, each adding to what's there. Never delete that folder.
 
-Ignore the smoke test's `DECISION` line: 20 attempts are far too few to decide anything.
+## Step 5: report
 
-If the smoke test didn't pass, see step 7. Then go to step 5 and report it before going on.
+Report to the operator **twice**: once after the smoke gate (`SMOKE_OK`, or a failure), so Szymon knows the setup works, and once at the end. If the chain stopped on a failure, report then instead.
 
-## Step 4: run the steps
-
-Run them one at a time. Wait for each `repair-analyze` job to finish, then read the decision:
-
-```bash
-bash helios/repair/run.sh --step 1 $OPTS
-# ... wait until squeue shows no repair* jobs ...
-grep '^DECISION' amu_work/repair/report.txt
-```
-
-Then follow the decision:
-
-| After | DECISION starts with | Do |
-|---|---|---|
-| step 1 | `GO TO STEP 2` or `INCONCLUSIVE` | report (step 5), then run `--step 2` |
-| step 1 | `STOP` | report (step 5) and finish (step 8) |
-| step 2 | `GO` or `INTERACTION WITHOUT CROSSOVER` | report (step 5) and **ask the operator** whether to run step 3 (about 6–12 GPU-hours) |
-| step 2 | `STOP` or `INCONCLUSIVE` | report (step 5) and finish (step 8) |
-| step 3 | anything | report (step 5) and finish (step 8) |
-
-Step 3 is run with 4 GPUs: `bash helios/repair/run.sh --step 3 $OPTS --gpus 4`.
-
-Steps 1–3 all write to `amu_work/repair/`. Each step adds to what's there, so never delete that folder between steps.
-
-## Step 5: report after each step
-
-Give the operator this summary to send to Szymon, with the results archive (`repair_smoke_results.tar.gz` for the smoke test, `repair_results.tar.gz` for steps 1–3, in the clone's root folder):
+Each finished stage leaves `<stage>_results.tar.gz` in the clone's root folder and `amu_work/repair*/report_<stage>.txt`. The last archive contains everything before it, so at the end only `step3_results.tar.gz` (plus `smoke_results.tar.gz`) needs to be sent.
 
 ```
-Step: <smoke / 1 / 2 / 3>
-Result archive: <absolute path>, <size>
+Last stage finished: <Lean check / smoke / step1 / step2 / step3>, or where and why the chain stopped
+Result archives: <absolute paths and sizes>
 Cluster / GPU partition / GPU type / CPU partition: <...>
 Lean check: <the "compile check: ..." line and COMPILE_CHECK_OK/FAILED>
+Smoke gate: <the "smoke gate: ..." line and SMOKE_OK/FAILED>
 Mathlib: <prebuilt download worked / built from source, how long>
 Speed: <typical new tok/s per GPU from the repair-gen logs>
-GPU time used this step and in total: <from sacct, see below>
+GPU time used: <total, from sacct, see below>
 Reruns needed: <none, or what failed and how it was fixed>
-report.txt (verbatim, from the arms table to the DECISION line):
+DECISION lines: <the DECISION line of each report_step*.txt>
+report_<last step>.txt (verbatim, from the arms table to the DECISION line):
 <paste>
 ```
 
 GPU time:
 
 ```bash
-sacct -u $USER -S $(date -d '-14 days' +%F) --name=repair-gen -X --format=JobID%18,State,Elapsed,AllocTRES%40
+sacct -u $USER -S $(date -d '-14 days' +%F) -X --format=JobID%18,JobName%22,State,Elapsed,AllocTRES%40 | grep -E 'JobID|repair-gen'
 ```
 
 ## Step 6: watch running jobs
@@ -190,13 +159,14 @@ tail -n 2 amu_work/logs/repair-compile-*.out      # progress: [k/n] compiled
 
 ## Step 7: fix failures
 
-The universal fix is to **run the same `run.sh` command again** from the same folder, once `squeue -u $USER` shows no `repair*` jobs. Everything finished is kept: the venv, Lean, a passed Lean check, every generated sample, and every compiled proof.
+The universal fix is to **run the same `run.sh --all` command again** from the same folder, once `squeue -u $USER` shows no `repair*` jobs. Everything finished is kept: the venv, Lean, a passed Lean check, every generated sample, and every compiled proof. The rerun resubmits the whole chain, but stages that are already done finish in minutes, because nothing is generated or compiled twice.
 
 | Symptom (where) | What to do |
 |---|---|
 | A job hit its time limit (`DUE TO TIME LIMIT` in a log, or `TIMEOUT` in `sacct -X -j <id>`) | Rerun. For `repair-gen` in step 3, add `--gpus 8` if the logs show under about 2,000 tok/s. |
 | `repair-lean` fails building Mathlib or the REPL (a `lake` error, not `COMPILE_CHECK_FAILED`) | Report the last 50 lines of the log to the operator. Don't edit `mathlib4/`. |
-| `COMPILE_CHECK_FAILED` | Stop and report (see step 3). |
+| `COMPILE_CHECK_FAILED` | Stop and report (see step 4). |
+| `SMOKE_FAILED` | Stop and report (see step 4). Don't rerun: the same samples would fail the same way. |
 | `CUDA out of memory` in a `repair-gen` log | Rerun with a partition or GRES that gives 80 GB GPUs. |
 | `repair-gen` fails at startup with a CUDA, driver or `nvcc` error | Report the log to the operator. Don't change the vLLM or torch versions. |
 | sbatch rejects a job (invalid account, partition or gres, or a QOS error) | Fix the option using what you learned in step 1; ask the operator if unsure. Then rerun. |
@@ -210,7 +180,7 @@ The universal fix is to **run the same `run.sh` command again** from the same fo
 ## Step 8: finish
 
 Tell the operator:
-- which step was the last one run, and why the experiment stopped there (the DECISION line, or the operator's choice);
+- whether all stages finished, or where and why the chain stopped;
 - the total GPU time used;
 - that all results are in the archives already reported.
 

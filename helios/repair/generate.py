@@ -13,6 +13,7 @@ Usage (one process per GPU):
   python helios/repair/generate.py ... --limit-attempts 20 --samples 1      # smoke test
 """
 import argparse
+import glob
 import hashlib
 import json
 import os
@@ -53,12 +54,14 @@ attempts = attempts[args.shard :: args.nshards]
 os.makedirs(args.out, exist_ok=True)
 out_path = os.path.join(args.out, f"gen_{args.shard}.jsonl")
 done = set()
-if os.path.exists(out_path):
-    for l in open(out_path, encoding="utf-8"):
+# Read every shard's file, not just ours: earlier steps may have run with a different number of
+# shards (e.g. steps 1-2 on 1 GPU, step 3 on 4), so our attempts' samples can be in any of them.
+for f in sorted(glob.glob(os.path.join(args.out, "gen_*.jsonl"))):
+    for l in open(f, encoding="utf-8"):
         try:
             done.add(json.loads(l)["id"])
         except (json.JSONDecodeError, KeyError):
-            pass   # a line cut off by a time limit; that request is simply redone
+            pass   # a line cut off by a time limit (or still being written); that request is simply redone
 
 
 def seed_of(rid):
